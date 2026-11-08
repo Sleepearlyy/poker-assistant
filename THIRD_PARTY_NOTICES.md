@@ -6,6 +6,7 @@
 - RapidOCR / rapidocr-onnxruntime：Apache-2.0；ONNX Runtime：MIT；OpenCV：Apache-2.0；MSS：MIT；NumPy：BSD-3-Clause。
 - Python、Tcl/Tk、PyInstaller 及其他传递依赖：保留所安装发行包中的许可证；PyInstaller 使用其引导器分发例外。
 - `licenses/` 由打包脚本从实际安装的依赖中收集许可证与元数据；以这些文件的具体条款为准。
+- `licenses/rust/` 保留 Cargo.lock 所列 registry 依赖的版权与许可证文件，包括 serde、rand、rayon、regex 等；即使某项仅用于构建或可选功能，也一并保留。
 - 不分发私人游戏截图、玩家资料、识别记录或服务器训练模型。程序不属于游戏官方软件。
 
 依赖不会因为应用采用 AGPL 而改变其原有许可证。向他人分发修改后的版本时，应提供与二进制对应的完整源码及构建说明。
