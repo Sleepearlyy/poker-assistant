@@ -64,11 +64,11 @@ def main():
     if conda_dlls.is_dir():
         os.environ['PATH'] = str(conda_dlls) + os.pathsep + os.environ.get('PATH', '')
     source = release / f'PokerAssistant-{VERSION}-source.zip'
-    with zipfile.ZipFile(source, 'w', zipfile.ZIP_DEFLATED) as archive:
+    with zipfile.ZipFile(source, 'w', zipfile.ZIP_DEFLATED, strict_timestamps=False) as archive:
         for path, relative in source_files():
             archive.write(path, relative.as_posix())
     collect_licenses(ROOT / 'build' / 'licenses')
-    shutil.copytree(ROOT / 'licenses', ROOT / 'build' / 'licenses', dirs_exist_ok=True)
+    shutil.copytree(ROOT / 'licenses', ROOT / 'build' / 'licenses', dirs_exist_ok=True, copy_function=shutil.copy)
     subprocess.run([sys.executable, '-m', 'PyInstaller', '--noconfirm', str(ROOT / '德扑助手.spec')], cwd=ROOT, check=True)
     app = ROOT / 'dist' / '德扑助手'
     shutil.copy2(source, app / source.name)
