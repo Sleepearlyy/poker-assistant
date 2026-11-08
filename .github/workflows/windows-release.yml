@@ -1,0 +1,49 @@
+name: Windows build
+on:
+  push:
+    tags: ['v*']
+  pull_request:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  build:
+    runs-on: windows-2022
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Install dependencies
+        run: python -m pip install -r requirements-build.txt
+      - name: Build solver
+        working-directory: solver
+        run: |
+          rustup default stable-msvc
+          cargo build --release --locked
+          Copy-Item target/release/poker-engine.exe poker-engine.exe
+      - name: Test
+        run: python -m unittest discover -v
+      - name: Package Windows application
+        run: python scripts/build_release.py --iscc "C:\Program Files (x86)\Inno Setup 6\ISCC.exe"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: PokerAssistant-windows-x64
+          path: release/*
+  publish:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: PokerAssistant-windows-x64
+          path: release
+      - name: Publish release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          TAG: ${{ github.ref_name }}
+        run: gh release create "$TAG" release/* --title "德扑助手 $TAG" --generate-notes
