@@ -32,7 +32,7 @@ jobs:
           cargo build --release --locked
           Copy-Item target/release/poker-engine.exe poker-engine.exe
       - name: Test
-        run: python -m unittest discover -v
+        run: python -m unittest discover -s tests -v
       - name: Package Windows application
         run: python scripts/build_release.py --iscc "C:\Program Files (x86)\Inno Setup 6\ISCC.exe"
       - uses: actions/upload-artifact@v4
@@ -61,5 +61,5 @@ jobs:
             gh release upload "$TAG" release/*-setup.exe --clobber
             gh release edit "$TAG" --target "$COMMIT" --draft=false
           else
-            gh release create "$TAG" release/*-setup.exe --target "$COMMIT" --title "德扑助手 $TAG" --notes "Windows 安装包；安装后即可使用。"
+            gh release create "$TAG" release/*-setup.exe --target "$COMMIT" --title "德扑助手 $TAG" --notes "Windows 10/11 x64 安装包。必须使用 Poker Fate 的「牌面·四色底色」。使用要求与注意事项见仓库说明。"
           fi

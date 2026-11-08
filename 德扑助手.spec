@@ -3,7 +3,7 @@ from PyInstaller.utils.hooks import collect_all
 from pathlib import Path
 import sys
 
-datas = [('layouts.json', '.'), ('assets', 'assets'), ('solver/poker-engine.exe', 'solver'), ('solver/NOTICE.md', 'solver')]
+datas = [('layouts.json', '.'), ('assets', 'assets'), ('solver/poker-engine.exe', 'solver')]
 binaries = []
 # Conda keeps these outside DLLs. Include them explicitly so a clean machine
 # does not depend on an activated Conda environment or its PATH.

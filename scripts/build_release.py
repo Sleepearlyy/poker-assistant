@@ -29,7 +29,16 @@ def collect_licenses(destination):
                 if original.is_file():
                     prefix = hashlib.sha256(str(file).encode()).hexdigest()[:10]
                     shutil.copy(original, folder / (prefix + '-' + file.name))
-    shutil.copytree(ROOT / 'licenses', destination, dirs_exist_ok=True, copy_function=shutil.copy)
+    metadata = json.loads(subprocess.check_output(['cargo', 'metadata', '--format-version', '1', '--locked'], cwd=ROOT/'solver'))
+    notices = []
+    for package in metadata['packages']:
+        if package['name'] == 'poker-engine':
+            continue
+        notices.append(f"\n{package['name']} {package['version']} | {package.get('license')} | {package.get('repository')}\n")
+        for file in Path(package['manifest_path']).parent.iterdir():
+            if file.is_file() and (any(word in file.name.lower() for word in ('license', 'copying', 'notice', 'copyright')) or file.name == 'AUTHORS'):
+                notices.append(file.read_text(encoding='utf-8', errors='replace'))
+    (destination/'RUST-NOTICES.txt').write_text('\n'.join(notices), encoding='utf-8')
 
 
 def main():
