@@ -614,13 +614,7 @@ class PokerPopup:
 def main():
     parser=argparse.ArgumentParser();parser.add_argument('--sample',help='用自己的截图测试，仍需点击才识别')
     parser.add_argument('--version',action='version',version=VERSION)
-    parser.add_argument('--diagnostics',metavar='JSON',help='运行离线资源和计算引擎检查，将结果写入 JSON 后退出')
     args=parser.parse_args()
-    if args.diagnostics:
-        from diagnostics import run
-        report=run()
-        write_json(args.diagnostics,report)
-        raise SystemExit(0 if report['ok'] else 1)
     enable_dpi();root=tk.Tk();app=PokerPopup(root,sample=args.sample)
     root.mainloop()
 

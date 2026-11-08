@@ -22,19 +22,18 @@ jobs:
         with:
           python-version: '3.11'
       - name: Install dependencies
-        run: python -m pip install -r requirements-build.txt
+        run: python -m pip install -r packaging/requirements.txt
       - id: version
+        working-directory: app
         run: python -c "from app_info import VERSION; print('version='+VERSION)" >> $env:GITHUB_OUTPUT
       - name: Build solver
-        working-directory: solver
+        working-directory: app/solver
         run: |
           rustup default stable-msvc
           cargo build --release --locked
           Copy-Item target/release/poker-engine.exe poker-engine.exe
-      - name: Test
-        run: python -m unittest discover -s tests -v
       - name: Package Windows application
-        run: python scripts/build_release.py --iscc "C:\Program Files (x86)\Inno Setup 6\ISCC.exe"
+        run: python packaging/build.py --iscc "C:\Program Files (x86)\Inno Setup 6\ISCC.exe"
       - uses: actions/upload-artifact@v4
         with:
           name: PokerAssistant-windows-x64

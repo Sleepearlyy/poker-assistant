@@ -2,8 +2,9 @@
 from PyInstaller.utils.hooks import collect_all
 from pathlib import Path
 import sys
+APP = Path(SPECPATH).parent / 'app'
 
-datas = [('layouts.json', '.'), ('assets', 'assets'), ('solver/poker-engine.exe', 'solver')]
+datas = [(str(APP/'layouts.json'), '.'), (str(APP/'assets/dealer.png'), 'assets'), (str(APP/'solver/poker-engine.exe'), 'solver')]
 binaries = []
 # Conda keeps these outside DLLs. Include them explicitly so a clean machine
 # does not depend on an activated Conda environment or its PATH.
@@ -19,8 +20,8 @@ datas += tmp_ret[0]; binaries += tmp_ret[1]; hiddenimports += tmp_ret[2]
 
 
 a = Analysis(
-    ['popup.py'],
-    pathex=[],
+    [str(APP/'popup.py')],
+    pathex=[str(APP)],
     binaries=binaries,
     datas=datas,
     hiddenimports=hiddenimports,

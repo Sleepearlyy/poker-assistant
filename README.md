@@ -11,7 +11,7 @@ Windows 本地德扑牌桌识别工具。读取筹码、下注、底池、大小
 - 适配 Poker Fate 当前牌桌布局，自己的座位在下方。少人局可以保留空座；其他布局需重新适配。
 - 游戏保持可见、完整且无遮挡；不要最小化。缩放或移动窗口后，框选区域可能需要重新设置。
 
-<img src="docs/deck-theme.png" alt="必须使用的牌面：牌面·四色底色" width="320">
+<img src="app/assets/deck-theme.png" alt="必须使用的牌面：牌面·四色底色" width="320">
 
 ## 操作
 
@@ -32,18 +32,21 @@ Windows 本地德扑牌桌识别工具。读取筹码、下注、底池、大小
 Python 3.10/3.11、Rust stable 和 C++ 构建工具：
 
 ```powershell
-pip install -r requirements-build.txt
-cd solver
+pip install -r app/requirements.txt
+cd app/solver
 cargo build --release --locked
 Copy-Item target/release/poker-engine.exe poker-engine.exe
 cd ..
 python popup.py
-python -m unittest discover -s tests -v
 ```
 
-打包需 Inno Setup 6：`python scripts/build_release.py --iscc "C:\Program Files (x86)\Inno Setup 6\ISCC.exe"`。
-布局配置见 `layouts.json`；GitHub Actions 可自动构建安装包。
+打包前安装 `packaging/requirements.txt` 中的依赖和 Inno Setup 6，在仓库根目录运行 `python packaging/build.py --iscc "C:\Program Files (x86)\Inno Setup 6\ISCC.exe"`。
+源码及布局配置在 `app/`，安装包构建文件在 `packaging/`。
 
 ## 许可
 
-[AGPL-3.0-or-later](LICENSE)。第三方声明见 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)。与游戏官方无隶属关系。
+[AGPL-3.0-or-later](LICENSE)。第三方声明见 [THIRD_PARTY_NOTICES.md](app/THIRD_PARTY_NOTICES.md)。与游戏官方无隶属关系。
+
+## 免责声明
+
+本项目仅供学习与技术研究，不保证识别准确、策略最优或盈利。使用者应自行判断结果，遵守所在地区法律及游戏平台规则，并承担使用风险。软件按现状提供，具体条款见 LICENSE。

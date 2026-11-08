@@ -11,8 +11,8 @@ sample-*.png
 sample-*.jpg
 *.bak
 *.log
-solver/target/
-solver/poker-engine.exe
+app/solver/target/
+app/solver/poker-engine.exe
 .env
 .env.*
 *.pem
