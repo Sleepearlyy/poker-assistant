@@ -29,7 +29,7 @@ jobs:
       - uses: actions/upload-artifact@v4
         with:
           name: PokerAssistant-windows-x64
-          path: release/*
+          path: release/*-setup.exe
   publish:
     if: startsWith(github.ref, 'refs/tags/v')
     needs: build
@@ -46,4 +46,4 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
           TAG: ${{ github.ref_name }}
-        run: gh release create "$TAG" release/* --title "德扑助手 $TAG" --generate-notes
+        run: gh release create "$TAG" release/*-setup.exe --title "德扑助手 $TAG" --generate-notes
