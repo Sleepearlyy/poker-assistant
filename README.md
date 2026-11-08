@@ -1,10 +1,10 @@
-# 德扑助手
+# 德扑助手 · Poker Assistant
 
 Windows 本地德扑牌桌识别工具。读取筹码、下注、底池、大小盲、手牌和公牌，在左下角显示动作建议与 EV。
 
 目前为早期版本，框选区域等功能尚未验证，可能出现无法识别或误读。游戏或助手位于前台时，A/Q 用作快捷键，可能影响正常输入。尽可能最大化Poker Fate窗口。识别结果与建议仅供参考，请自行核对并判断是否适用。
 
-**[下载安装包](https://github.com/Sleepearlyy/poker-screen-reader/releases/latest)**，双击 `.exe` 安装，从开始菜单打开“德扑助手”。
+**[下载安装包](https://github.com/Sleepearlyy/poker-assistant/releases/latest)**，双击 `.exe` 安装，从开始菜单打开“德扑助手”。
 
 ## 使用要求
 
