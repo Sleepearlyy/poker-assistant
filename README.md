@@ -10,7 +10,7 @@
 
 - Windows 10/11 x64，无需 Python、Conda 或独立显卡。
 - 游戏设为 **窗口模式、1600×900**，牌面使用 **「牌面·四色底色」**，如下图。
-- 自己坐在下方；少人局保留空座。支持普通金额、K/M 和 BB 显示。
+- 少人局保留空座。支持普通金额、K/M 和 BB 显示。
 - 保持游戏可见，收起下注面板，等待动画结束后识别。
 
 <img src="app/assets/display-settings.png" alt="显示设置：窗口模式，1600×900" width="260"> <img src="app/assets/deck-theme.png" alt="牌面设置：牌面·四色底色" width="260">
