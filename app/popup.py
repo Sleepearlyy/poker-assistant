@@ -299,14 +299,14 @@ class PokerPopup:
         self.root.bind('<MouseWheel>',self.scroll_panel,add='+')
         header=ttk.Frame(self.body);self.header=header;header.pack(fill='x')
         self.scan_btn=ttk.Button(header,text='识别 A',width=6,style='Accent.TButton',command=self.scan)
-        self.locate_btn=ttk.Button(header,text='定位',width=4,command=self.locate)
         self.toggle_btn=ttk.Button(header,text='收起 Q',width=6,command=self.collapse)
-        more=ttk.Menubutton(header,text='更多',width=3)
+        more=ttk.Menubutton(header,text='更多')
         menu=tk.Menu(more,tearoff=0,bg='#252935',fg='#f1f3f8',activebackground='#233549',activeforeground='#ffffff',borderwidth=0)
+        menu.add_command(label='定位游戏',command=self.locate)
         menu.add_command(label='计算依据',command=self.show_assumptions)
         menu.add_separator();menu.add_command(label='退出',command=self.close)
         more.configure(menu=menu)
-        self.toolbar=[self.scan_btn,self.locate_btn,self.toggle_btn,more]
+        self.toolbar=[self.scan_btn,self.toggle_btn,more]
         self.status=tk.StringVar(value='')
         self.target=tk.StringVar();self.update_target()
         self.details=ttk.Frame(self.body);self.details.pack(fill='both',expand=True)
@@ -487,7 +487,7 @@ class PokerPopup:
 
     def set_busy(self,busy):
         self.busy=busy
-        for button in (self.scan_btn,self.chip_btn,self.locate_btn):button.configure(state='disabled' if busy else 'normal')
+        for button in (self.scan_btn,self.chip_btn):button.configure(state='disabled' if busy else 'normal')
         self.chip_btn.configure(text='…' if busy else 'A 识别')
 
     def restore(self):
