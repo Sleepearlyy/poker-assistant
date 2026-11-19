@@ -1,5 +1,6 @@
 """Poker Fate screen reader. Local OCR only; no game input or strategy."""
 import argparse
+import copy
 import ctypes
 import json
 import os
@@ -93,12 +94,34 @@ def rank_glyph(crop):
 def load_layout(path, frame, selected):
     layouts = json.loads(Path(path).read_text(encoding='utf-8'))
     ratio = frame.shape[1] / frame.shape[0]
-    name = selected if selected != 'auto' else min(layouts, key=lambda k: abs(layouts[k]['aspect'] - ratio))
+    # Current game UI scales with viewport height. Table elements stay centred;
+    # blinds are anchored left and action controls are anchored right.
+    # Keep the older tall/spectator layout for its separate arrangement.
+    name = selected if selected != 'auto' else ('wide' if ratio >= 1.6 else 'tall')
     if name not in layouts:
         raise ValueError(f"Unknown layout {name}; available: {list(layouts)}")
-    if abs(ratio / layouts[name]['aspect'] - 1) > 0.12:
-        raise ValueError('Game aspect ratio differs too much. Select only the complete game content, or calibrate a layout.')
-    return name, layouts[name]
+    layout=copy.deepcopy(layouts[name])
+    if name=='wide':
+        factor=layout['aspect']/ratio
+        def rect(box,anchor=.5):
+            x1,y1,x2,y2=box
+            return [max(0.,anchor+(x1-anchor)*factor),y1,min(1.,anchor+(x2-anchor)*factor),y2]
+        layout['blinds']=rect(layout['blinds'],0)
+        layout['pot']=rect(layout['pot'])
+        for seat in layout['seats']:
+            for key in ('stack','name','action','fold'):
+                if key in seat:seat[key]=rect(seat[key])
+            seat['action'][1]=max(0.,seat['action'][1]-.018)
+        for key in ('hero_cards','board_cards'):
+            layout[key]=[rect(box) for box in layout[key]]
+        layout['hero_controls']=rect(layout['hero_controls'],1)
+        layout['hero_controls'][1]=min(layout['hero_controls'][1],.83)
+        layout['bet_presets']=[rect(box,1) for box in layout.get('bet_presets',[])]
+        layout['dealer_anchors']={key:[.5+(xy[0]-.5)*factor,xy[1]] for key,xy in layout['dealer_anchors'].items()}
+        layout['aspect']=ratio
+    elif abs(ratio / layout['aspect'] - 1) > .12:
+        raise ValueError('当前画面比例尚未适配，请使用横向游戏窗口。')
+    return name, layout
 
 class Reader:
     def __init__(self, layout, debug=None):
@@ -107,6 +130,7 @@ class Reader:
         self.ocr = RapidOCR(intra_op_num_threads=2, inter_op_num_threads=2,
                             det_limit_type='max', det_limit_side_len=736)
         self.raw = {}
+        self.big_blind = None
 
     def read_crop(self, crop, key, detection=True, scale=None):
         if crop.size == 0:
@@ -132,7 +156,7 @@ class Reader:
         return self.read_crop(roi(frame, rect), key)
 
     def pot(self, frame):
-        return numeric(self.read(frame, self.layout['pot'], 'pot'))
+        return numeric(self.read(frame, self.layout['pot'], 'pot'), big_blind=self.big_blind)
 
     def read_fold(self, frame, rect, key):
         x1, y1, x2, y2 = rect
@@ -144,9 +168,9 @@ class Reader:
     def stack(self, frame, rect, key):
         # Read a slightly wider box first: big stacks (245.32K) are wider than the
         # preset box and a clipped "K" turns a valid amount into None or a wrong number.
-        value = numeric(self.read(frame, pad_rect(rect, .012), key + '_stack'))
+        value = numeric(self.read(frame, pad_rect(rect, .012), key + '_stack'), big_blind=self.big_blind)
         if value is None:
-            value = numeric(self.read(frame, rect, key + '_stack_exact'))
+            value = numeric(self.read(frame, rect, key + '_stack_exact'), big_blind=self.big_blind)
         return value
 
     def card(self, frame, rect, key):
@@ -181,7 +205,8 @@ class Reader:
         found = None
         for scale in (1.0, None):
             lines = self.read_crop(crop, 'hero_controls', scale=scale)
-            found = facing_button(' '.join(x['text'] for x in lines if x['score'] >= .8))
+            found = facing_button(' '.join(x['text'] for x in lines if x['score'] >= .8), self.big_blind)
+            if found['source']=='preaction_buttons':break
             if found['hero_turn'] and not (found['source'] == 'call_button' and found['to_call'] is None):
                 break
         return found
@@ -191,7 +216,7 @@ class Reader:
         if not template_path.exists() or not self.layout.get('dealer_anchors'):
             return None
         template = load_image(template_path)
-        scale = frame.shape[1]/1920
+        scale = frame.shape[0]/1010 if self.layout['aspect']>=1.6 else frame.shape[1]/1920
         template = cv2.resize(template, None, fx=scale, fy=scale)
         h,w = frame.shape[:2]
         zone = frame[int(h*.25):int(h*.76), int(w*.15):int(w*.85)]
@@ -210,10 +235,11 @@ class Reader:
         result = {'captured_at': datetime.now(timezone.utc).isoformat(),
                   'image_size': [frame.shape[1], frame.shape[0]], 'seats': []}
         result['blinds'] = blinds(self.read(frame, self.layout['blinds'], 'blinds'))
+        self.big_blind = (result['blinds'] or {}).get('big')
         result['pot'] = self.pot(frame)
         result['bet_presets'] = []
         if result['pot'] and self.layout.get('bet_presets'):
-            values=[numeric(self.read(frame, rect, 'preset_'+str(i))) for i,rect in enumerate(self.layout['bet_presets'])]
+            values=[numeric(self.read(frame, rect, 'preset_'+str(i)),big_blind=self.big_blind) for i,rect in enumerate(self.layout['bet_presets'])]
             expected=[1,2/3,1/2,1/3]
             if sum(v is not None and abs(v['value']-result['pot']['value']*f)<=max(2,result['pot']['value']*.01) for v,f in zip(values,expected))>=3:
                 result['bet_presets']=sorted(v['value'] for v in values if v is not None)
@@ -226,10 +252,10 @@ class Reader:
             if stack is None:
                 name_lines = self.read(frame, seat['name'], key + '_name')
                 name = ' '.join(x['text'] for x in name_lines if x['score'] >= 0.8) or None
-            act = action(self.read(frame, seat['action'], key + '_action'))
+            act = action(self.read(frame, seat['action'], key + '_action'),self.big_blind)
             if seat.get('fold') and act['action'] != 'fold':
-                folded = action(self.read_fold(frame, seat['fold'], key + '_fold'))
-                if folded['action'] == 'fold':
+                folded = self.read_fold(frame, seat['fold'], key + '_fold')
+                if any(row['score'] >= .7 and re.fullmatch(r'fold|弃牌|棄牌',re.sub(r'\s+','',row['text']),re.I) for row in folded):
                     act['action'] = 'fold'
             present = (stack is not None or name is not None or act['action'] is not None
                        or act['displayed_bet'] is not None)

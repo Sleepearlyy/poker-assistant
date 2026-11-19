@@ -5,38 +5,48 @@ result plus the local solver's action frequencies and chip EVs.
 """
 import argparse
 import ctypes
-import json
 import os
 from ctypes import wintypes
-from datetime import datetime
-from pathlib import Path
 import queue
 import threading
 import time
 import tkinter as tk
-from tkinter import ttk, messagebox
+from tkinter import ttk, messagebox, font as tkfont
 import traceback
 
 import mss
+import cv2
 import numpy as np
-from reader import DATA, ROOT, Reader, enable_dpi, load_image, load_layout, select_region, trim_titlebar, write_json
+from reader import DATA, ROOT, Reader, enable_dpi, load_image, load_layout, trim_titlebar, write_json
 from advisor import analyze
 from core import format_chips
 from app_info import VERSION
 
-SETTINGS=DATA/'popup-settings.json'
 ACTIONS={'fold':'弃牌','check':'过牌','call':'跟注','bet':'下注','raise':'加注','all_in':'全下',
          'small_blind':'小盲','big_blind':'大盲'}
+
+def display_amount(result,value):
+    big=(result.get('blinds') or {}).get('big')
+    bb=(result.get('pot') or {}).get('unit')=='bb' or any(
+        (s.get('stack') or {}).get('unit')=='bb' for s in result.get('seats',[]))
+    if bb and big:
+        return f'{value/big:.2f}'.rstrip('0').rstrip('.')+'BB'
+    return format_chips(value)
+
+def display_action(result,action):
+    label=ACTIONS.get(action['action'],action['action'])
+    return label+' '+display_amount(result,action['amount']) if action.get('amount') else label
 
 def price_text(result):
     """Call, check, or all-in. A short stack often has no separate call button."""
     controls=result.get('controls') or {}
     source=controls.get('source')
     amount=controls.get('to_call')
+    if source=='preaction_buttons':return '等待轮到自己'
     if source=='check_button':return '过牌'
     if source in ('all_in_button','all_in_for_stack'):
-        return '全下' if amount is None else f'全下 {amount}'
-    return '跟注 未知' if amount is None else f'跟注 {amount}'
+        return '全下' if amount is None else '全下 '+display_amount(result,amount)
+    return '跟注 未知' if amount is None else '跟注 '+display_amount(result,amount)
 
 def seat_label(seat):
     """Button-relative seat name. Hero is always marked; empty chairs stay empty."""
@@ -60,6 +70,7 @@ user.IsIconic.argtypes=[wintypes.HWND];user.IsIconic.restype=wintypes.BOOL
 user.GetWindowTextLengthW.argtypes=[wintypes.HWND];user.GetWindowTextLengthW.restype=ctypes.c_int
 user.GetWindowTextW.argtypes=[wintypes.HWND,wintypes.LPWSTR,ctypes.c_int];user.GetWindowTextW.restype=ctypes.c_int
 user.GetClientRect.argtypes=[wintypes.HWND,ctypes.POINTER(wintypes.RECT)]
+user.GetWindowRect.argtypes=[wintypes.HWND,ctypes.POINTER(wintypes.RECT)]
 user.ClientToScreen.argtypes=[wintypes.HWND,ctypes.POINTER(wintypes.POINT)]
 user.GetWindowThreadProcessId.argtypes=[wintypes.HWND,ctypes.POINTER(wintypes.DWORD)]
 user.SetForegroundWindow.argtypes=[wintypes.HWND]
@@ -149,11 +160,11 @@ def grab_window(hwnd):
     if w<300 or h<200:return None
     hdc=user.GetDC(hwnd)
     if not hdc:return None
-    mem=0;bmp=0
+    mem=0;bmp=0;original=0
     try:
         mem=gdi32.CreateCompatibleDC(hdc);bmp=gdi32.CreateCompatibleBitmap(hdc,w,h)
         if not mem or not bmp:return None
-        gdi32.SelectObject(mem,bmp)
+        original=gdi32.SelectObject(mem,bmp)
         if not user.PrintWindow(hwnd,mem,3):return None  # PW_CLIENTONLY|PW_RENDERFULLCONTENT
         info=BITMAPINFO();header=info.bmiHeader
         header.biSize=ctypes.sizeof(BITMAPINFOHEADER);header.biWidth=w;header.biHeight=-h
@@ -164,6 +175,7 @@ def grab_window(hwnd):
         if float(frame.mean())<8 or float(frame.std())<8:return None
         return frame
     finally:
+        if original:gdi32.SelectObject(mem,original)
         if bmp:gdi32.DeleteObject(bmp)
         if mem:gdi32.DeleteDC(mem)
         user.ReleaseDC(hwnd,hdc)
@@ -184,10 +196,10 @@ def describe(hwnd):
             'region':dict(left=point.x,top=point.y,width=rect.right,height=rect.bottom)}
 
 def game_title(title):
-    return 'pokerfate' in ''.join(title.casefold().split())
+    return ''.join(title.casefold().split()) == 'pokerfate'
 
 def game_window():
-    """The Poker Fate client, including a title that is not exactly 'Poker Fate'."""
+    """Find Poker Fate, never use an unrelated foreground window as a fallback."""
     exact=describe(user.FindWindowW(None,'Poker Fate'))
     if exact:return exact
     found=[]
@@ -207,10 +219,21 @@ def focus_window(hwnd):
         user.SetForegroundWindow(hwnd)
     except OSError:pass
 
-def work_area(root):
-    rect=wintypes.RECT()
-    if user.SystemParametersInfoW(48,0,ctypes.byref(rect),0):
-        return rect.left,rect.top,rect.right,rect.bottom
+class MONITORINFO(ctypes.Structure):
+    _fields_=[('cbSize',wintypes.DWORD),('rcMonitor',wintypes.RECT),
+              ('rcWork',wintypes.RECT),('dwFlags',wintypes.DWORD)]
+
+user.MonitorFromWindow.argtypes=[wintypes.HWND,wintypes.DWORD]
+user.MonitorFromWindow.restype=wintypes.HANDLE
+user.GetMonitorInfoW.argtypes=[wintypes.HANDLE,ctypes.POINTER(MONITORINFO)]
+
+def work_area(root, hwnd=None):
+    hwnd=hwnd or user.GetAncestor(int(root.winfo_id()),GA_ROOT)
+    info=MONITORINFO();info.cbSize=ctypes.sizeof(info)
+    monitor=user.MonitorFromWindow(hwnd,2)
+    if monitor and user.GetMonitorInfoW(monitor,ctypes.byref(info)):
+        r=info.rcWork
+        return r.left,r.top,r.right,r.bottom
     return 0,0,root.winfo_screenwidth(),root.winfo_screenheight()
 
 class PokerPopup:
@@ -218,31 +241,45 @@ class PokerPopup:
         self.root=root;self.sample=sample;self.save_settings=save_settings
         self.events=queue.Queue();self.busy=False;self.closed=False;self.expanded=False
         self.reader=None;self.reader_layout=None;self.last_result=None
-        self.mode='window';self.region=None
+        self.preview=None
         self.last_foreground=game_window()
         self.own_pid=os.getpid()
         self.own_hwnd=user.GetAncestor(int(root.winfo_id()),GA_ROOT)
-        if save_settings and SETTINGS.exists():
-            try:
-                settings=json.loads(SETTINGS.read_text(encoding='utf-8'))
-                if settings.get('mode')=='region' and isinstance(settings.get('region'),dict):
-                    r=settings['region']
-                    if all(isinstance(r.get(k),int) for k in ('left','top','width','height')) and r['width']>10 and r['height']>10:
-                        self.mode='region';self.region=r
-            except (ValueError,OSError):pass
         root.title(f'德扑助手 {VERSION} · 点击识别');root.attributes('-topmost',True)
-        root.configure(bg='#101820');root.resizable(False,False)
+        root.configure(bg='#111318');root.resizable(True,True)
         root.protocol('WM_DELETE_WINDOW',self.close)
         style=ttk.Style(root);style.theme_use('clam')
-        style.configure('TFrame',background='#101820')
-        style.configure('TLabel',background='#101820',foreground='#d9e4ed',font=('Microsoft YaHei UI',10))
-        style.configure('Muted.TLabel',foreground='#91a6b6',font=('Microsoft YaHei UI',9))
-        style.configure('Title.TLabel',font=('Microsoft YaHei UI',10,'bold'),foreground='#fafcff')
-        style.configure('Accent.TButton',font=('Microsoft YaHei UI',9,'bold'),padding=(8,2),background='#38b8a3',foreground='#082422')
-        style.configure('TButton',padding=(4,1),font=('Microsoft YaHei UI',8))
-        style.configure('Treeview',background='#182631',fieldbackground='#182631',foreground='#e4edf4',rowheight=18,font=('Microsoft YaHei UI',9),borderwidth=0)
-        style.configure('Treeview.Heading',background='#233744',foreground='#a4becd',font=('Microsoft YaHei UI',8),padding=1)
-        style.map('Treeview',background=[('selected','#245c60')])
+        style.configure('.',background='#111318',foreground='#f5f6fa',bordercolor='#292d38',
+                        lightcolor='#111318',darkcolor='#111318',troughcolor='#111318')
+        style.configure('TFrame',background='#111318')
+        style.configure('TLabel',background='#111318',foreground='#f5f6fa',font=('Microsoft YaHei UI',9))
+        style.configure('Muted.TLabel',foreground='#b8c0cf',font=('Microsoft YaHei UI',8))
+        style.configure('TButton',background='#272b35',foreground='#f1f3f8',borderwidth=0,
+                        relief='flat',padding=(8,4),font=('Microsoft YaHei UI',8))
+        style.map('TButton',background=[('pressed','#363c4c'),('active','#323847')],
+                  foreground=[('disabled','#697183')])
+        style.configure('Accent.TButton',font=('Microsoft YaHei UI',8,'bold'),background='#245d99',foreground='#ffffff')
+        style.map('Accent.TButton',background=[('disabled','#343641'),('pressed','#1d4e83'),('active','#2f70b4')],
+                  foreground=[('disabled','#b8c0cf'),('!disabled','#ffffff')])
+        style.configure('TMenubutton',background='#272b35',foreground='#f1f3f8',borderwidth=0,padding=(6,4),font=('Microsoft YaHei UI',8))
+        style.map('TMenubutton',background=[('active','#323847')])
+        style.configure('TNotebook',background='#111318',borderwidth=0,tabmargins=(0,4,0,0))
+        style.configure('TNotebook.Tab',background='#111318',foreground='#b8c0cf',borderwidth=0,
+                        padding=(12,4),font=('Microsoft YaHei UI',8))
+        style.map('TNotebook.Tab',background=[('selected','#272b35'),('active','#20242d')],
+                  foreground=[('selected','#a8d8ff'),('active','#f5f6fa')])
+        for orientation in ('Vertical','Horizontal'):
+            name=orientation+'.TScrollbar'
+            style.configure(name,background='#383e4b',troughcolor='#111318',borderwidth=0,
+                            arrowsize=9,width=8,gripcount=0)
+            style.map(name,background=[('active','#535c70'),('pressed','#69758e')])
+            style.layout(name,[(orientation+'.Scrollbar.trough',{'sticky':'nswe','children':[
+                (orientation+'.Scrollbar.thumb',{'expand':'1','sticky':'nswe'})]})])
+        rowheight=tkfont.Font(root,font=('Microsoft YaHei UI',9)).metrics('linespace')+3
+        style.configure('Treeview',background='#1d2028',fieldbackground='#1d2028',foreground='#f1f3f8',rowheight=rowheight,font=('Microsoft YaHei UI',9),borderwidth=0,relief='flat')
+        style.configure('Treeview.Heading',background='#252935',foreground='#d0d7e5',font=('Microsoft YaHei UI',8),padding=(4,3),borderwidth=0,relief='flat')
+        style.map('Treeview',background=[('selected','#233549')])
+        style.map('Treeview.Heading',background=[('active','#2d3240')])
         self.outer=ttk.Frame(root,padding=(12,10));self.outer.pack(fill='both',expand=True)
         self.chip=ttk.Frame(self.outer)
         self.chip_btn=ttk.Button(self.chip,text='A 识别',style='Accent.TButton',command=self.scan)
@@ -250,163 +287,235 @@ class PokerPopup:
         self.chip_menu=tk.Menu(root,tearoff=0)
         self.chip_menu.add_command(label='退出',command=self.close)
         self.chip_btn.bind('<Button-3>',lambda event:self.chip_menu.tk_popup(event.x_root,event.y_root))
-        header=ttk.Frame(self.outer);self.header=header
-        ttk.Label(header,text='德扑助手',style='Title.TLabel').pack(side='left')
-        self.scan_btn=ttk.Button(header,text='再识别 A',style='Accent.TButton',command=self.scan);self.scan_btn.pack(side='left',padx=(8,0))
-        self.select_btn=ttk.Button(header,text='框选区域',command=self.choose_region);self.select_btn.pack(side='left',padx=(6,0))
-        self.locate_btn=ttk.Button(header,text='定位游戏',command=self.locate);self.locate_btn.pack(side='left',padx=(6,0))
-        ttk.Button(header,text='退出',command=self.close).pack(side='right')
-        self.toggle_btn=ttk.Button(header,text='收起 Q',command=self.collapse);self.toggle_btn.pack(side='right',padx=(0,6))
-        ttk.Button(header,text='计算依据',command=self.show_assumptions).pack(side='right',padx=(0,6))
-        self.status=tk.StringVar(value='按 A 识别，按 Q 收起。')
-        self.details=ttk.Frame(self.outer)
+        self.panel=ttk.Frame(self.outer)
+        self.canvas=tk.Canvas(self.panel,bg='#111318',highlightthickness=0,width=1,height=1)
+        self.scroll=ttk.Scrollbar(self.panel,orient='vertical',command=self.canvas.yview)
+        self.canvas.configure(yscrollcommand=self.scroll.set)
+        self.scroll.pack(side='right',fill='y');self.canvas.pack(side='left',fill='both',expand=True)
+        self.body=ttk.Frame(self.canvas)
+        self.body_id=self.canvas.create_window(0,0,window=self.body,anchor='nw')
+        self.body.bind('<Configure>',lambda e:self.canvas.configure(scrollregion=self.canvas.bbox('all')))
+        self.canvas.bind('<Configure>',self.reflow)
+        self.root.bind('<MouseWheel>',self.scroll_panel,add='+')
+        header=ttk.Frame(self.body);self.header=header;header.pack(fill='x')
+        self.scan_btn=ttk.Button(header,text='识别 A',width=6,style='Accent.TButton',command=self.scan)
+        self.locate_btn=ttk.Button(header,text='定位',width=4,command=self.locate)
+        self.toggle_btn=ttk.Button(header,text='收起 Q',width=6,command=self.collapse)
+        more=ttk.Menubutton(header,text='更多',width=3)
+        menu=tk.Menu(more,tearoff=0,bg='#252935',fg='#f1f3f8',activebackground='#233549',activeforeground='#ffffff',borderwidth=0)
+        menu.add_command(label='计算依据',command=self.show_assumptions)
+        menu.add_separator();menu.add_command(label='退出',command=self.close)
+        more.configure(menu=menu)
+        self.toolbar=[self.scan_btn,self.locate_btn,self.toggle_btn,more]
+        self.status=tk.StringVar(value='')
         self.target=tk.StringVar();self.update_target()
-        info=ttk.Frame(self.details);info.pack(fill='x',pady=(3,0))
-        self.money=tk.StringVar(value='底池 —    盲注 —')
-        ttk.Label(info,textvariable=self.money,font=('Microsoft YaHei UI',9,'bold')).pack(side='left')
+        self.details=ttk.Frame(self.body);self.details.pack(fill='both',expand=True)
+        self.money=tk.StringVar(value='底池 —')
         self.cards=tk.StringVar(value='手牌 —    公牌 —')
-        ttk.Label(info,textvariable=self.cards,font=('Segoe UI Symbol',9)).pack(side='left',padx=(10,0))
         self.equity=tk.StringVar(value='胜率 —')
-        ttk.Label(info,textvariable=self.equity,font=('Microsoft YaHei UI',11,'bold'),foreground='#57d6ba').pack(side='right')
         self.recommendation=tk.StringVar(value='识别后自动分析')
-        ttk.Label(self.details,textvariable=self.recommendation,font=('Microsoft YaHei UI',12,'bold'),foreground='#57d6ba').pack(anchor='w')
-        ttk.Label(self.details,textvariable=self.status,style='Muted.TLabel').pack(anchor='w')
-        tables=ttk.Frame(self.details);tables.pack(fill='both',expand=True,pady=(2,0))
-        self.seats=ttk.Treeview(tables,columns=('seat','stack','bet','action'),show='headings',height=6,selectmode='none')
-        for col,title,width in [('seat','位置',108),('stack','后手',78),('bet','下注',72),('action','动作',72)]:
-            self.seats.heading(col,text=title);self.seats.column(col,width=width,anchor='center',stretch=True)
-        self.seats.pack(side='left',fill='both',expand=True,padx=(0,8))
-        self.ev=ttk.Treeview(tables,columns=('action','ev','bb','freq'),show='headings',height=6,selectmode='none')
-        for col,title,width in [('action','候选动作',128),('ev','EV 筹码',84),('bb','EV 大盲',62),('freq','频率',52)]:
-            self.ev.heading(col,text=title);self.ev.column(col,width=width,anchor='center',stretch=True)
-        self.ev.tag_configure('best',foreground='#57d6ba')
-        self.ev.pack(side='left',fill='both',expand=True)
+        self.wrap_labels=[]
+        for variable,options in [
+            (self.money,{'font':('Microsoft YaHei UI',9)}),
+            (self.cards,{'font':('Segoe UI Symbol',10)}),
+            (self.equity,{'font':('Microsoft YaHei UI',9),'foreground':'#f1f3f8'}),
+            (self.recommendation,{'font':('Microsoft YaHei UI',10,'bold'),'foreground':'#a8d8ff'})]:
+            label=ttk.Label(self.details,textvariable=variable,anchor='w',justify='left',wraplength=500,**options)
+            label.pack(fill='x',padx=4,pady=(3,0));self.wrap_labels.append(label)
+        self.tables=ttk.Notebook(self.details);self.tables.pack(fill='both',expand=True,pady=(3,0))
+        self.table_frames=[];self.table_widths=[]
+        for name,columns in [('seats',[('seat','位置',84),('stack','后手',64),('bet','下注',58),('action','动作',54)]),
+                             ('ev',[('action','候选动作',104),('ev','EV 筹码',70),('bb','EV 大盲',58),('freq','频率',44)])]:
+            frame=ttk.Frame(self.tables);self.table_frames.append(frame)
+            self.tables.add(frame,text='牌桌' if name=='seats' else '动作 EV')
+            tree=ttk.Treeview(frame,columns=tuple(c[0] for c in columns),show='headings',height=6,selectmode='none')
+            setattr(self,name,tree)
+            scale=float(root.tk.call('tk','scaling'))/(96/72)
+            widths=[]
+            for col,title,width in columns:
+                width=round(width*scale);widths.append(width)
+                tree.heading(col,text=title);tree.column(col,width=width,minwidth=width,anchor='center',stretch=True)
+            self.table_widths.append(sum(widths)+24)
+            ys=ttk.Scrollbar(frame,orient='vertical',command=tree.yview)
+            xs=ttk.Scrollbar(frame,orient='horizontal',command=tree.xview)
+            tree.configure(yscrollcommand=ys.set,xscrollcommand=xs.set)
+            tree.grid(row=0,column=0,sticky='nsew');ys.grid(row=0,column=1,sticky='ns')
+            xs.grid(row=1,column=0,sticky='ew');frame.columnconfigure(0,weight=1);frame.rowconfigure(0,weight=1)
+        self.ev.tag_configure('best',foreground='#a8d8ff',background='#233549')
+        self.ev.configure(displaycolumns=('action','bb'))
+        status_label=ttk.Label(self.details,textvariable=self.status,style='Muted.TLabel',justify='left',wraplength=400)
+        status_label.pack(fill='x',pady=(2,0),before=self.tables);self.wrap_labels.append(status_label)
         self.collapse()
         root.deiconify();root.state('normal');root.update();self.position()
+        self.dark_titlebar(root)
         root.lift();root.attributes('-topmost',True)
         root.bind('<Destroy>',self._on_destroy)
         self._install_hotkey()
         root.after(50,self.position);root.after(80,self.poll);root.after(250,self.track_foreground)
 
+    def scroll_panel(self,event):
+        if self.expanded and event.widget not in (self.seats,self.ev):
+            self.canvas.yview_scroll(-int(event.delta/120),'units')
+            return 'break'
+
+    def reflow(self,event=None):
+        if not self.expanded:return
+        width=max(1,event.width if event else self.canvas.winfo_width())
+        self.canvas.itemconfigure(self.body_id,width=width)
+        for label in self.wrap_labels:label.configure(wraplength=max(1,width-8))
+        cell=max(button.winfo_reqwidth() for button in self.toolbar)+6
+        count=max(1,min(len(self.toolbar),width//cell))
+        for index in range(len(self.toolbar)):self.header.columnconfigure(index,weight=0,uniform='')
+        for index,button in enumerate(self.toolbar):
+            button.grid(row=index//count,column=index%count,sticky='ew',padx=(0,4),pady=2)
+        for index in range(count):self.header.columnconfigure(index,weight=1,uniform='buttons')
+
     def position(self):
-        l,t,r,b=work_area(self.root)
+        target=(self.last_foreground or {}).get('hwnd')
+        l,t,r,b=work_area(self.root,target)
         self.root.update_idletasks()
         if not self.expanded:
-            width,height=max(72,self.chip.winfo_reqwidth()+4),28
+            width,height=self.chip.winfo_reqwidth()+6,self.chip.winfo_reqheight()+6
         else:
-            width=min(780,r-l-32)
-            height=min(self.root.winfo_reqheight()+6,320)
-        x,y=l+16,max(t+8,b-height-(40 if self.expanded else 16))
-        self.root.geometry(f'{width}x{height}+{x}+{y}')
-        self.root.attributes('-topmost',True)
+            scale=float(self.root.tk.call('tk','scaling'))/(96/72)
+            width=min(round(380*scale),round((r-l)*.22))
+            self.root.geometry(f'{width}x200')
+            self.root.update_idletasks();self.reflow();self.root.update_idletasks()
+            height=min(self.body.winfo_reqheight()+12,round((b-t)*.32))
+        self.root.geometry(f'{width}x{height}')
         self.root.update_idletasks()
+        # Tk geometry is client size; SetWindowPos must not shrink it to outer size.
         hwnd=user.GetAncestor(int(self.root.winfo_id()),GA_ROOT)
-        user.SetWindowPos(hwnd,-1,x,y,width,height,0x0040)
+        rect=wintypes.RECT();user.GetWindowRect(hwnd,ctypes.byref(rect))
+        x=l+16;y=max(t+8,b-(rect.bottom-rect.top)-16)
+        user.SetWindowPos(hwnd,-1,x,y,0,0,0x0041)  # SHOWWINDOW | NOSIZE
+        self.root.attributes('-topmost',True)
 
     def collapse(self):
-        """Only the corner button stays on screen."""
         self.expanded=False
-        self.details.pack_forget();self.header.pack_forget()
+        self.panel.pack_forget()
         self.outer.configure(padding=(3,3))
         self.chip.pack(fill='both',expand=True)
         self.root.overrideredirect(True)
-        self.root.update_idletasks()
         self.position()
 
     def expand(self):
-        """Open the result panel from the corner button."""
         self.expanded=True
         self.chip.pack_forget()
         self.outer.configure(padding=(6,4))
         self.root.overrideredirect(False)
-        self.header.pack(fill='x')
-        self.details.pack(fill='both',expand=True)
-        self.position()
+        self.panel.pack(fill='both',expand=True)
+        self.position();self.canvas.yview_moveto(0)
+        self.dark_titlebar(self.root)
         self.root.lift()
 
-    def update_target(self):
-        if self.sample:text='示例图片测试'
-        elif self.mode=='window':
-            name=(self.last_foreground or {}).get('title')
-            text='自动截取 '+name if name else '正在寻找 Poker Fate 窗口'
-        else:text='已框选区域（游戏移动后需重新框选）'
-        self.target.set(text)
+    @staticmethod
+    def dark_titlebar(window):
+        try:
+            hwnd=user.GetAncestor(int(window.winfo_id()),GA_ROOT)
+            enabled=ctypes.c_int(1)
+            ctypes.windll.dwmapi.DwmSetWindowAttribute(wintypes.HWND(hwnd),20,ctypes.byref(enabled),ctypes.sizeof(enabled))
+        except (OSError,AttributeError):pass
 
-    def persist(self):
-        if self.save_settings:
-            write_json(SETTINGS,{'mode':self.mode,'region':self.region})
+    def update_target(self):
+        found=self.last_foreground
+        if self.sample:text='示例图片测试'
+        elif found:
+            r=found['region'];text=f"Poker Fate · 游戏内容区 {r['width']} × {r['height']}"
+        else:text='未找到 Poker Fate，请打开游戏并取消最小化。'
+        self.target.set(text)
 
     def track_foreground(self):
         if self.closed:return
         try:
             found=game_window()
-            if found:
-                previous=self.last_foreground or {}
-                if found['hwnd']!=previous.get('hwnd') or found['region']!=previous.get('region'):
-                    self.last_foreground=found
-                    if self.mode=='window':self.update_target()
-            else:
-                hwnd=user.GetForegroundWindow()
-                if hwnd and int(hwnd)!=int(self.own_hwnd):
-                    pid=wintypes.DWORD();user.GetWindowThreadProcessId(hwnd,ctypes.byref(pid))
-                    got=describe(hwnd) if pid.value!=self.own_pid else None
-                    if got and (not self.last_foreground or got['hwnd']!=self.last_foreground['hwnd']):
-                        self.last_foreground=got
-                        if self.mode=='window':self.update_target()
+            if found!=self.last_foreground:
+                self.last_foreground=found;self.update_target()
+            area=work_area(self.root)
+            if area!=getattr(self,'_work_area',None):
+                if hasattr(self,'_work_area'):self.position()
+                self._work_area=work_area(self.root)
         except OSError:pass
-        self.root.after(400,self.track_foreground)
+        self.root.after(800,self.track_foreground)
 
     def locate(self):
         if self.busy:return
-        found=game_window() or (describe(self.last_foreground['hwnd']) if self.last_foreground else None)
-        if not found:self.status.set('未找到游戏窗口：请先切到游戏再点“定位游戏”，或使用“框选区域”。');return
-        self.last_foreground=found
-        self.mode='window';self.region=None;self.sample=None;self.persist();self.update_target()
-        self.status.set(f'已定位：{found["title"]}。按 A 开始识别。')
+        self.close_preview()
+        self.last_foreground=game_window();self.sample=None;self.update_target()
+        if not self.last_foreground:
+            self.status.set('请打开 Poker Fate 并取消最小化。');self.expand();return
+        found=self.last_foreground
+        frame=grab_window(found['hwnd'])
+        if frame is not None:
+            self.show_preview(frame);return
+        self.set_busy(True);self.root.withdraw();focus_window(found['hwnd'])
+        self.root.after(260,lambda:self.capture_once(found['hwnd'],preview=True))
+
+    def close_preview(self):
+        if self.preview is not None:
+            self.preview.destroy();self.preview=None
+            self.restore()
+
+    def show_preview(self,frame):
+        self.close_preview()
+        h,w=frame.shape[:2]
+        l,t,r,b=work_area(self.root,(self.last_foreground or {}).get('hwnd'))
+        max_width=max(1,min(600,round((r-l)*.38))-24)
+        max_height=max(1,round((b-t)*.36)-100)
+        scale=min(max_width/w,max_height/h,1.)
+        thumb=cv2.resize(frame,(max(1,round(w*scale)),max(1,round(h*scale))),interpolation=cv2.INTER_AREA)
+        ok,encoded=cv2.imencode('.png',thumb)
+        if not ok:raise ValueError('截图预览生成失败')
+        win=tk.Toplevel(self.root);self.preview=win
+        self.root.withdraw()
+        win.title('游戏窗口预览');win.configure(bg='#111318');win.attributes('-topmost',True)
+        win.resizable(False,False);win.protocol('WM_DELETE_WINDOW',self.close_preview)
+        body=ttk.Frame(win,padding=12);body.pack(fill='both',expand=True)
+        ttk.Label(body,text=f'Poker Fate  ·  {w} × {h}',font=('Microsoft YaHei UI',9,'bold')).pack(anchor='w',pady=(0,8))
+        win.photo=tk.PhotoImage(master=win,data=encoded.tobytes())
+        tk.Label(body,image=win.photo,bg='#111318',borderwidth=0).pack()
+        footer=ttk.Frame(body);footer.pack(fill='x',pady=(10,0))
+        ttk.Button(footer,text='刷新截图',command=self.locate).pack(side='left')
+        ttk.Button(footer,text='确认范围',style='Accent.TButton',command=self.confirm_preview).pack(side='right')
+        win.update_idletasks()
+        win.geometry(f'+{l+16}+{max(t+8,b-win.winfo_reqheight()-50)}')
+        self.dark_titlebar(win);win.lift()
+        self.status.set('已定位游戏内容区，可在预览中核对范围。')
+
+    def confirm_preview(self):
+        self.close_preview();self.status.set('已确认游戏窗口，按 A 识别。')
 
     def set_busy(self,busy):
         self.busy=busy
-        for button in (self.scan_btn,self.chip_btn,self.select_btn,self.locate_btn):button.configure(state='disabled' if busy else 'normal')
+        for button in (self.scan_btn,self.chip_btn,self.locate_btn):button.configure(state='disabled' if busy else 'normal')
         self.chip_btn.configure(text='…' if busy else 'A 识别')
 
     def restore(self):
         if not self.closed:
             self.root.deiconify();self.root.attributes('-topmost',True)
 
-    def choose_region(self):
-        if self.busy:return
-        self.set_busy(True);self.status.set('请框选完整游戏内容，Enter 确认，Esc 取消。')
-        self.root.withdraw();self.root.after(240,self.select_after_hide)
-
-    def select_after_hide(self):
-        try:
-            with mss.mss() as capture:
-                screen=capture.monitors[0]
-                image=np.asarray(capture.grab(screen))[:,:,:3].copy()
-            x,y,w,h=select_region(image,'Select full game; ENTER confirms; ESC cancels')
-            self.region=dict(left=screen['left']+x,top=screen['top']+y,width=w,height=h)
-            self.mode='region';self.sample=None;self.persist();self.update_target()
-            self.status.set('范围已保存。按 A 读取画面。')
-        except Exception as exc:self.status.set('未更改截图范围：'+str(exc))
-        finally:self.restore();self.set_busy(False)
-
     def current_target(self):
         if self.sample:return None,None
-        found=game_window() or (describe(self.last_foreground['hwnd']) if self.last_foreground else None)
-        if self.mode=='region' and self.region:return None,self.region
-        if found:return found,found['region']
-        return None,None
+        found=game_window()
+        self.last_foreground=found;self.update_target()
+        return (found,found['region']) if found else (None,None)
 
     def scan(self):
         if self.busy:return
+        self.close_preview()
+        self.last_result=None
+        self.ev.delete(*self.ev.get_children())
+        self.seats.delete(*self.seats.get_children())
+        self.money.set('底池 —');self.cards.set('手牌 —    公牌 —');self.equity.set('胜率 —')
+        self.recommendation.set('正在读取本次画面…')
         try:
             if self.sample:found,region=None,None
             else:found,region=self.current_target()
-            if not self.sample and region is None:raise ValueError('请先打开游戏并切到游戏窗口，或点击“框选区域”。')
+            if not self.sample and region is None:raise ValueError('未找到 Poker Fate，请打开游戏并取消最小化。')
             self.set_busy(True)
             self.recommendation.set('正在读取本次画面…')
             self.ev.delete(*self.ev.get_children())
-            if found and self.mode=='window' and not self.sample:
+            if found and not self.sample:
                 self.status.set('正在读取游戏窗口…');self.root.update_idletasks()
                 frame=grab_window(found['hwnd'])
                 if frame is not None:
@@ -417,26 +526,46 @@ class PokerPopup:
             self.status.set('正在截图…')
             self.root.withdraw()
             if found:focus_window(found['hwnd'])
-            self.root.after(260,lambda:self.capture_once(region))
-        except Exception as exc:self.status.set(str(exc));self.set_busy(False);self.expand()
+            self.root.after(260,lambda:self.capture_once(found['hwnd'] if found else None))
+        except Exception as exc:
+            self.recommendation.set('未读取到游戏画面')
+            self.status.set(str(exc));self.set_busy(False);self.expand()
 
-    def capture_once(self,region):
+    def capture_once(self,hwnd,preview=False):
         if self.closed:return
         try:
             if self.sample:frame=load_image(self.sample)
             else:
                 try:ctypes.windll.dwmapi.DwmFlush()
                 except (OSError,AttributeError):pass
-                with mss.mss() as capture:frame=np.asarray(capture.grab(region))[:,:,:3].copy()
-            self.restore();self.status.set('正在识别…')
-            threading.Thread(target=self.process,args=(frame,),daemon=True).start()
-        except Exception as exc:self.restore();self.status.set('截图失败：'+str(exc));self.set_busy(False)
+                found=describe(hwnd)
+                if not found or not game_title(found['title']):
+                    raise ValueError('Poker Fate 已关闭或最小化，请恢复游戏后重试。')
+                if user.GetForegroundWindow()!=hwnd:
+                    raise ValueError('请将 Poker Fate 切到前台后重试。')
+                region=found['region']
+                with mss.mss() as capture:
+                    screen=capture.monitors[0]
+                    if (region['left']<screen['left'] or region['top']<screen['top'] or
+                        region['left']+region['width']>screen['left']+screen['width'] or
+                        region['top']+region['height']>screen['top']+screen['height']):
+                        raise ValueError('请将游戏窗口完整移回屏幕内后重试。')
+                    frame=np.asarray(capture.grab(region))[:,:,:3].copy()
+            self.restore()
+            if preview:
+                self.set_busy(False);self.show_preview(frame);return
+            self.status.set('正在识别…')
+            threading.Thread(target=self.process,args=(frame,bool(self.sample)),daemon=True).start()
+        except Exception as exc:
+            self.recommendation.set('未读取到游戏画面')
+            self.restore();self.status.set('截图失败：'+str(exc));self.set_busy(False);self.expand()
 
     def read_frame(self,frame,trim=True):
         if trim:frame=trim_titlebar(frame)
         name,layout=load_layout(ROOT/'layouts.json',frame,'auto')
         if self.reader is None or self.reader_layout!=name:
             self.reader=Reader(layout);self.reader_layout=name
+        else:self.reader.layout=layout
         result=self.reader.scan(frame);result['layout']=name
         return result
 
@@ -465,9 +594,9 @@ class PokerPopup:
                 except OSError:pass
 
     def render_ocr(self,result):
-        b=result.get('blinds');p=result.get('pot')
+        p=result.get('pot')
         pot='未知' if not p else (('约 ' if p.get('approximate') else '')+p['display'])
-        self.money.set(f"底池 {pot}    盲注 {str(b['small'])+'/'+str(b['big']) if b else '未知'}    {price_text(result)}")
+        self.money.set(f"底池 {pot}    {price_text(result)}")
         self.cards.set('手牌 '+' '.join(c['card'] or '—' for c in result['hero_cards'])+'    公牌 '+' '.join(c['card'] or '—' for c in result['board_cards']))
         self.seats.delete(*self.seats.get_children())
         for s in result['seats']:
@@ -481,23 +610,22 @@ class PokerPopup:
         self.last_result=result;advice=result['advice']
         self.render_ocr(result)
         self.ev.delete(*self.ev.get_children())
+        self.tables.select(self.table_frames[1])
         if advice['status']!='ok':
             self.recommendation.set('暂不建议：'+advice['message'])
             self.equity.set('胜率 —')
             self.expand();return
         rec=advice['recommendation'];context=advice['context']
-        b=result.get('blinds')
-        self.money.set(f"底池 {context['pot']:,}    盲注 {str(b['small'])+'/'+str(b['big']) if b else '未知'}    {price_text(result)}")
+        self.money.set(f"底池 {display_amount(result,context['pot'])}    {price_text(result)}")
         frequency=f"（频率 {rec['frequency']*100:.0f}%）" if rec.get('frequency') is not None else ''
-        close=f"   和「{advice['close']['label']}」差不多" if advice.get('close') else ''
-        self.recommendation.set('建议 '+rec['label']+frequency+close)
+        self.recommendation.set('建议 '+display_action(result,rec)+frequency)
         need=f"  跟注需 {advice['required_equity']*100:.0f}%" if context['call'] else ''
         self.equity.set(f"胜率 {advice['equity']*100:.0f}%{need}")
         gto=advice['mode']=='gto'
-        self.ev.configure(displaycolumns=('action','ev','bb','freq') if gto else ('action','ev','bb'))
+        self.ev.configure(displaycolumns=('action','bb','freq') if gto else ('action','bb'))
         for a in advice['actions']:
             freq='—' if a.get('frequency') is None else f"{a['frequency']*100:.0f}%"
-            self.ev.insert('',tk.END,values=(a['label'],format_chips(a['ev'],signed=True),f"{a['ev_bb']:+.1f}",freq),
+            self.ev.insert('',tk.END,values=(display_action(result,a),format_chips(a['ev'],signed=True),f"{a['ev_bb']:+.1f}",freq),
                            tags=('best',) if a is rec else ())
         self.expand()
 
@@ -511,12 +639,11 @@ class PokerPopup:
                 elif kind=='status':self.status.set(data)
                 elif kind=='done':
                     self.render_advice(data);self.set_busy(False)
-                    timestamp=datetime.fromisoformat(data['captured_at']).astimezone().strftime('%H:%M:%S')
-                    advice=data['advice'];seconds=(data.get('elapsed_ms',0)+advice.get('elapsed_ms',0))/1000
-                    parts=[f'画面 {timestamp}',f'用时 {seconds:.1f} 秒']
+                    advice=data['advice']
                     if advice['status']=='ok':
-                        parts.insert(0,f"{advice['mode_label']} · {advice['context']['opponents']} 位对手")
-                    self.status.set(' · '.join(parts)+' · 按 A 再识别，按 Q 收起')
+                        mode='估算 · 非 GTO' if advice['mode']=='estimate' else advice['mode_label']
+                        self.status.set(f"{mode} · {advice['context']['opponents']} 位对手")
+                    else:self.status.set('')
                 elif kind=='error':
                     self.recommendation.set('本次分析失败，请重试')
                     self.status.set(data);self.set_busy(False);self.expand()

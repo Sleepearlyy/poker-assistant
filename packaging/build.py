@@ -56,7 +56,7 @@ def main():
     app = ROOT/'dist/德扑助手'
     for name in ['LICENSE', 'README.md']:
         shutil.copy(ROOT/name, app/name)
-    for relative in ['assets/deck-theme.png', 'THIRD_PARTY_NOTICES.md']:
+    for relative in ['assets/deck-theme.png', 'assets/display-settings.png', 'THIRD_PARTY_NOTICES.md']:
         target = app/'app'/relative
         target.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy(APP/relative, target)

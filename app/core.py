@@ -2,7 +2,10 @@
 import re
 from decimal import Decimal
 
-AMOUNT = r"(?:\d{1,3}(?:,\d{3})+|\d+)(?:\.\d+)?[KkMm万]?"
+AMOUNT = r"(?:\d{1,3}(?:,\d{3})+|\d+)(?:\.\d+)?(?:[Bb]{2}|[KkMm万])?"
+
+def _bb_text(text):
+    return re.sub(r'(?<=\d)\s*[Bb]\s*[Bb]\b', 'BB', text)
 
 def format_chips(value, signed=False):
     """Compact display only; amounts used by the solver retain their full precision."""
@@ -19,10 +22,17 @@ def format_chips(value, signed=False):
         text = '+' + text
     return text + suffix
 
-def amount(text):
+def amount(text, big_blind=None):
     value = re.sub(r"\s+", "", text).replace("，", ",")
     if not re.fullmatch(AMOUNT, value):
         return None
+    if value.upper().endswith('BB'):
+        if big_blind is None or big_blind <= 0:
+            return None
+        bb = Decimal(value[:-2].replace(',', ''))
+        result = bb * Decimal(str(big_blind))
+        return {'value': int(result) if result == int(result) else float(result),
+                'display': text, 'approximate': True, 'unit': 'bb', 'big_blinds': float(bb)}
     suffix = value[-1].upper()
     multiplier = {"K": 1000, "M": 1000000, "万": 10000}.get(suffix, 1)
     number = value[:-1] if multiplier != 1 else value
@@ -30,8 +40,8 @@ def amount(text):
     return {"value": int(result) if result == int(result) else float(result),
             "display": text, "approximate": multiplier != 1}
 
-def numeric(lines, threshold=0.8):
-    candidates = [(amount(x["text"]), x["score"]) for x in lines if x["score"] >= threshold]
+def numeric(lines, threshold=0.8, *, big_blind=None):
+    candidates = [(amount(x["text"], big_blind), x["score"]) for x in lines if x["score"] >= threshold]
     candidates = [(a, score) for a, score in candidates if a is not None]
     if not candidates or len({a["value"] for a, _ in candidates}) != 1:
         return None
@@ -45,26 +55,28 @@ def blinds(lines):
         match = re.search(rf"({AMOUNT})\s*[/／]\s*({AMOUNT})", row["text"])
         if match:
             small, big = amount(match[1]), amount(match[2])
-            if small["value"] <= 0 or big["value"] < small["value"]:
+            if not small or not big or small["value"] <= 0 or big["value"] < small["value"]:
                 continue
             return {"small": small["value"], "big": big["value"],
                     "approximate": small["approximate"] or big["approximate"],
                     "confidence": round(row["score"], 3), "raw": row["text"]}
     return None
 
-def facing_button(text):
+def facing_button(text, big_blind=None):
     """跟注 disappears when the stack cannot cover the bet. Then only all-in or fold remains."""
-    text = text or ""
+    text = _bb_text(text or "")
+    if re.search(r"跟\s*任\s*何|弃\s*牌\s*[/／]\s*过\s*牌|棄\s*牌\s*[/／]\s*過\s*牌|call\s+any|fold\s*/\s*check", text, re.I):
+        return {"to_call": None, "source": "preaction_buttons", "hero_turn": False}
     if re.search(r"过\s*牌|過\s*牌|\bcheck\b", text, re.I):
         return {"to_call": 0, "source": "check_button", "hero_turn": True}
     if re.search(r"跟\s*注|\bcall\b", text, re.I):
         nums = re.findall(AMOUNT, text)
-        parsed = amount(nums[0]) if len(nums) == 1 else None
+        parsed = amount(nums[0], big_blind) if len(nums) == 1 else None
         return {"to_call": parsed["value"] if parsed else None,
                 "source": "call_button", "hero_turn": True}
     if re.search(r"弃\s*牌|棄\s*牌|加\s*注|全\s*下|全\s*押|all[\s_-]*in|\bfold\b|\braise\b", text, re.I):
         nums = re.findall(AMOUNT, text)
-        parsed = amount(nums[0]) if len(nums) == 1 else None
+        parsed = amount(nums[0], big_blind) if len(nums) == 1 else None
         return {"to_call": parsed["value"] if parsed else None,
                 "source": "all_in_button", "hero_turn": True}
     return {"to_call": None, "source": None, "hero_turn": False}
@@ -75,21 +87,22 @@ def _center(row):
         return None
     return (sum(p[0] for p in box) / len(box), sum(p[1] for p in box) / len(box))
 
-def action(lines):
+def action(lines, big_blind=None):
     aliases = [("all_in", r"all[\s_-]*in|全下|全押"), ("fold", r"fold|弃\s*牌|棄\s*牌"),
                ("check", r"check|过\s*牌|過\s*牌"), ("call", r"call|跟\s*注"),
                ("raise", r"raise|加\s*注"), ("bet", r"\bbet\b|下\s*注"),
                ("small_blind", r"\bSB\b|小盲"), ("big_blind", r"\bBB\b|大盲")]
     good = [x for x in lines if x["score"] >= 0.75]
-    text = " ".join(x["text"] for x in good)
+    # A unit such as "3 BB" is not the player's big-blind action label.
+    text = " ".join(re.sub(AMOUNT, '', _bb_text(x["text"])) for x in good)
     label = next((key for key, pattern in aliases if re.search(pattern, text, re.I)), None)
     bets = []
     for row in good:
-        parsed = amount(re.sub(r"\s+", "", row["text"]))
+        parsed = amount(re.sub(r"\s+", "", row["text"]), big_blind)
         if parsed is None:
-            found = re.findall(AMOUNT, row["text"])
+            found = re.findall(AMOUNT, _bb_text(row["text"]))
             if len(found) == 1:
-                parsed = amount(found[0])
+                parsed = amount(found[0], big_blind)
         if parsed is not None:
             bets.append((parsed, row))
     bet = None
@@ -199,8 +212,12 @@ def visible_pot(snapshot):
     if total <= 0:
         return None
     total = int(total) if total == int(total) else total
-    return {"value": total, "display": str(total), "approximate": True,
-            "confidence": None, "source": "visible_bets"}
+    result = {"value": total, "display": str(total), "approximate": True,
+              "confidence": None, "source": "visible_bets"}
+    big = (snapshot.get('blinds') or {}).get('big')
+    if big and any((s.get('displayed_bet') or {}).get('unit')=='bb' for s in snapshot.get('seats',[])):
+        result.update(display=f'{total/big:g}BB',unit='bb',big_blinds=total/big)
+    return result
 
 class Stability:
     """Confirm consecutive observations; never silently carry stale data forward."""
